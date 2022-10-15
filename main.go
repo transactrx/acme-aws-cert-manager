@@ -38,6 +38,7 @@ import (
 
 type CertificateType string
 
+
 const (
 	EndpointCertificate  CertificateType = "certificate"
 	CertificateAuthority CertificateType = "ca"
