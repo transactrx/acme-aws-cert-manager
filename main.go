@@ -5,11 +5,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -18,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/smithy-go"
 	"go.uber.org/zap"
+	"net/smtp"
 	"os"
 	"time"
 
@@ -60,10 +58,9 @@ type Certificates struct {
 
 func main() {
 	// read domain names from account --done
-	// read existing certificates from secrets named wildcard.${domainName}
-	// if secret does not exist or its within 30 days of expiration
-	// generate new set of certificates using new key, let old key expire
-	// store new structure for each domain in secrets manager.
+	// read existing certificates from secrets named wildcard.${domainName} --done
+	// if secret does not exist or its within 30 days of expiration generate new set of certificates using new key, let old key expire --done
+	// store new structure for each domain in secrets manager --done
 	// process will run daily to ensure that within the 30 days before expiring, the cert is created.
 	// push alert if unable to generate
 
@@ -71,7 +68,7 @@ func main() {
 	if certsEmailAddress == "" {
 		log.Fatalln(fmt.Errorf("CERTS_EMAIL address environment variable is required"))
 	}
-	daysBeforeExpiringRenewal := int64(30)
+	daysBeforeExpiringRenewal := int64(91)
 
 	client, err := getRoute53Client()
 	maxZone := int32(350)
@@ -83,13 +80,17 @@ func main() {
 		log.Fatal(err)
 	}
 
+	//continue on failures
 	for _, zone := range listOutput.HostedZones {
 
 		secretClient, err := getRouteSecretsManagerClient()
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("domain:%s err:%v", *zone.Name, err)
+			continue
 		}
-		secretName := "certstest4.wildcard." + *zone.Name
+		zoneName := *zone.Name
+		zoneName = zoneName[:len(zoneName)-1]
+		secretName := "cert.wildcard." + zoneName
 		secretDesc := "Automatically maintained wildcard certs for domain"
 		createSecretInput := secretsmanager.CreateSecretInput{
 			Name:                        &secretName,
@@ -105,27 +106,36 @@ func main() {
 				if strings.Contains(strings.ToLower(oErr), "resourceexistsexception") {
 					secretIsPresent = true
 				} else {
-					log.Fatal(err)
+					log.Printf("domain:%s err:%v", *zone.Name, err)
+					continue
 				}
 			} else {
-				log.Fatal(err)
+				log.Printf("domain:%s err:%v", *zone.Name, err)
+				continue
 			}
 
 		}
-
-		expiredCert, err := isCertificateExpiring(secretClient, &secretName, daysBeforeExpiringRenewal)
-		if err != nil {
-			log.Fatalln(err)
+		expiredCertV := false
+		expiredCert := &expiredCertV
+		if secretIsPresent {
+			expiredCert, err = isCertificateExpiring(secretClient, &secretName, daysBeforeExpiringRenewal)
+			if err != nil {
+				log.Printf("domain:%s err:%v", *zone.Name, err)
+				continue
+			}
 		}
+
 		if !secretIsPresent || *expiredCert {
 			certs, err := getCertsFromACME(*zone.Name, certsEmailAddress)
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("domain:%s err:%v", *zone.Name, err)
+				continue
 			}
 
 			certConent, err := json.Marshal(certs)
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("domain:%s err:%v", *zone.Name, err)
+				continue
 			}
 			certConentString := string(certConent)
 			putSecretInput := secretsmanager.PutSecretValueInput{
@@ -134,7 +144,8 @@ func main() {
 			}
 			putSecretValueOutput, err := secretClient.PutSecretValue(context.Background(), &putSecretInput)
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("domain:%s err:%v", *zone.Name, err)
+				continue
 			}
 			log.Printf("SecretManager putsecretVal output: %v", putSecretValueOutput)
 
@@ -150,20 +161,26 @@ func main() {
 
 func isCertificateExpiring(client *secretsmanager.Client, secretName *string, daysBeforeExpiringRenewal int64) (*bool, error) {
 
+	result := false
+	found := false
+
 	getValueInput := secretsmanager.GetSecretValueInput{
 		SecretId: secretName,
 	}
 	secretVal, err := client.GetSecretValue(context.Background(), &getValueInput)
 	if err != nil {
-		return nil, err
+		//error reading value, so we will induce recreation by calling the certificate expire
+		result = true
+		log.Printf("error retreiving certificate from secretsmanager, we will default to replacing the value")
+		return &result, nil
+
 	}
 	cert := Certificates{}
 	err = json.Unmarshal([]byte(*secretVal.SecretString), &cert)
 	if err != nil {
 		return nil, err
 	}
-	result := false
-	found := false
+
 	nowPlusDaysInMillis := time.Now().UnixMilli() + (time.Hour.Milliseconds() * 24 * daysBeforeExpiringRenewal)
 	for _, certificate := range cert.Certs {
 		if certificate.CertType == EndpointCertificate {
@@ -201,7 +218,8 @@ func getCertsFromACME(hostName, emailAddress string) (*Certificates, error) {
 
 	client := acmez.Client{
 		Client: &acme.Client{
-			Directory: "https://acme-staging-v02.api.letsencrypt.org/directory", // default pebble endpoint
+			//Directory: "https://acme-staging-v02.api.letsencrypt.org/directory", // default pebble endpoint
+			Directory: "https://acme-v02.api.letsencrypt.org/directory",
 			HTTPClient: &http.Client{
 				Transport: &http.Transport{
 					TLSClientConfig: &tls.Config{
@@ -296,7 +314,7 @@ func getCertsFromACME(hostName, emailAddress string) (*Certificates, error) {
 		return nil, err
 	}
 
-	if len(certsToStoreList) != 1 {
+	if len(certsToStoreList) == 0 {
 		return nil, fmt.Errorf("expected once certificate bundle from the ACME service, but got %d", len(certsToStoreList))
 	}
 
@@ -328,8 +346,8 @@ func (s mySolver) Present(ctx context.Context, chal acme.Challenge) error {
 	for true {
 		time.Sleep(time.Second * 10)
 		timeInSeconds := time.Now().UnixMilli() / 1000
-		log.Printf("Waiting for the records to propogate.  1 minute, remaining %d seconds", timeInSeconds-startTimeInSeconds)
-		if timeInSeconds-startTimeInSeconds >= 60 {
+		log.Printf("Waiting for the records to propogate.  5 minute, waited for %d seconds", timeInSeconds-startTimeInSeconds)
+		if timeInSeconds-startTimeInSeconds >= 300 {
 			break
 		}
 	}
@@ -507,34 +525,18 @@ func encode(privateKey *ecdsa.PrivateKey) string {
 	return string(pemEncoded)
 }
 
-func generateCertSigningRequest() {
-	keyBytes, _ := rsa.GenerateKey(rand.Reader, 1024)
+func sendMail(fromAddress, password, toAddress, subject, body string) {
 
-	emailAddress := "test@example.com"
-	subj := pkix.Name{
-		CommonName:         "example.com",
-		Country:            []string{"AU"},
-		Province:           []string{"Some-State"},
-		Locality:           []string{"MyCity"},
-		Organization:       []string{"Company Ltd"},
-		OrganizationalUnit: []string{"IT"},
-		ExtraNames: []pkix.AttributeTypeAndValue{
-			{
-				//Type: oidEmailAddress,
-				Value: asn1.RawValue{
-					Tag:   asn1.TagIA5String,
-					Bytes: []byte(emailAddress),
-				},
-			},
-		},
+	message := fmt.Sprintf("From: %s\nTo: %s\n Subject: %s\n\n,%s", fromAddress, toAddress, subject, body)
+
+	err := smtp.SendMail("smtp.gmail.com:587",
+		smtp.PlainAuth("", fromAddress, password, "smtp.gmail.com"),
+		fromAddress, []string{toAddress}, []byte(message))
+
+	if err != nil {
+		log.Printf("smtp error: %s", err)
+		return
 	}
 
-	template := x509.CertificateRequest{
-		Subject:            subj,
-		SignatureAlgorithm: x509.SHA256WithRSA,
-	}
-
-	csrBytes, _ := x509.CreateCertificateRequest(rand.Reader, &template, keyBytes)
-	pem.Encode(os.Stdout, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
-
+	log.Print("sent, visit http://foobarbazz.mailinator.com")
 }
