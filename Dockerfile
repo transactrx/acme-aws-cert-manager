@@ -12,9 +12,6 @@ RUN echo "build complete"
 #Runtime container
 FROM alpine:3
 
-ENV API_KEY="CHANGE ME"
-ENV PRIVATE_KEY="CHANGE ME"
-ENV PORT="22"
 
 COPY --from=builder /acme-aws-cert-manager/acme-aws-cert-manager /usr/local/bin/
 
