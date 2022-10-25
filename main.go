@@ -36,7 +36,6 @@ import (
 
 type CertificateType string
 
-
 const (
 	EndpointCertificate  CertificateType = "certificate"
 	CertificateAuthority CertificateType = "ca"
@@ -319,7 +318,39 @@ func getCertsFromACME(hostName, emailAddress string) (*Certificates, error) {
 		return nil, fmt.Errorf("expected once certificate bundle from the ACME service, but got %d", len(certsToStoreList))
 	}
 
-	return &certsToStoreList[0], nil
+	resultingCerts := combineCerts(certsToStoreList)
+
+	return &resultingCerts, nil
+}
+
+func combineCerts(certificates []Certificates) Certificates {
+
+	var result = Certificates{}
+	for i := 0; i < len(certificates); i++ {
+		result.Domain = certificates[i].Domain
+		if result.PrivateKey == "" {
+			result.PrivateKey = certificates[i].PrivateKey
+		}
+		for _, cert := range certificates[i].Certs {
+			if !isCertInList(result, cert) {
+				result.Certs = append(result.Certs, cert)
+			}
+		}
+	}
+	return result
+
+}
+
+func isCertInList(certList Certificates, cert Certificate) bool {
+	found := false
+	for _, lsCert := range certList.Certs {
+		if cert.Pem == lsCert.Pem {
+			found = true
+			break
+		}
+	}
+	log.Printf("certificate already in list: %v", found)
+	return found
 }
 
 // mySolver is a no-op acmez.Solver for example purposes only.
