@@ -1,16 +1,35 @@
-name: release-binary
+name: goreleaser
+
 on:
-  release:
-    types: [created]
+  push:
+    branches:
+      - Production
+
+permissions:
+  contents: write
+  # packages: write
+  # issues: write
 
 jobs:
-  release-linux-amd64:
-    name: release linux/amd64
+  goreleaser:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: wangyoucao577/go-release-action@v1.35
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          goos: linux
-          goarch: amd64
+          fetch-depth: 0
+      - run: git fetch --force --tags
+      - uses: actions/setup-go@v3
+        with:
+          go-version: '>=1.19.5'
+          cache: true
+      # More assembly might be required: Docker logins, GPG, etc. It all depends
+      # on your needs.
+      - uses: goreleaser/goreleaser-action@v4
+        with:
+          # either 'goreleaser' (default) or 'goreleaser-pro':
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
