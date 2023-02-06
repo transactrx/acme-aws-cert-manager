@@ -79,7 +79,7 @@ func HandleRequest(ctx context.Context, name MyEvent) (string, error) {
 	if certsEmailAddress == "" {
 		return "error", fmt.Errorf("CERTS_EMAIL address environment variable is required")
 	}
-	daysBeforeExpiringRenewal := int64(91)
+	daysBeforeExpiringRenewal := int64(30)
 
 	client, err := getRoute53Client()
 	maxZone := int32(350)
